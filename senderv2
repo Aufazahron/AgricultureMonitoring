@@ -1,0 +1,117 @@
+#include <LiquidCrystal_I2C.h> 
+#include <DHT11.h>
+#include <MQUnifiedsensor.h>
+
+
+// Setup MQ-2 
+#define Board ("ESP-32")
+#define Pin (36)
+#define Type ("MQ-2")
+#define Voltage_Resolution (3.3)
+#define ADC_Bit_Resolution (12)
+#define RatioMQ2CleanAir (9.83)
+
+#define AOUT_PIN 35
+
+// inisialisasi LCD
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// inisialisasi DHT11
+DHT11 dht11(15);
+
+// inisialisasi MQ-2 Sensor
+MQUnifiedsensor MQ2(Board, Voltage_Resolution, ADC_Bit_Resolution, Pin, Type);
+
+// inisialisasi WindSpeed
+const int sensorPin = 18;
+volatile unsigned long jumlahPutaran = 0;
+unsigned long waktuMulai;
+const float KONSTANTA = 18.00; //Jumlah Rotor 18
+
+void setup() {
+  Serial.begin(9600);
+  lcd.begin();
+  lcd.print("Monitoring");
+  lcd.clear();
+
+  // Mq2
+  setupMq2();
+  
+  // WindSpeed
+  attachInterrupt(digitalPinToInterrupt(sensorPin), hitungPutaran, RISING); 
+  waktuMulai = millis();
+}
+
+void loop() {
+  anemometer();
+  // dht11
+  int temperature = 0;
+  int humidity = 0;
+  int result = dht11.readTemperatureHumidity(temperature, humidity);
+  
+  // MQ2 
+  MQ2.update();
+  float gasCo = MQ2.readSensor();
+
+  // Soil Mosture
+  float kelembabanTanah;
+  int hasilPembacaan = analogRead(AOUT_PIN);
+  kelembabanTanah = map(hasilPembacaan, 1900, 4095, 100, 0);
+  Serial.println(kelembabanTanah);
+
+  // Lcd
+  lcd.setCursor(0, 0);
+  lcd.print(temperature);
+  lcd.setCursor(0, 1);
+  lcd.print(humidity);
+  lcd.setCursor(5, 0);
+  lcd.print(gasCo);
+  lcd.setCursor(12, 0);
+  lcd.print(kelembabanTanah);
+  lcd.setCursor(12, 1);
+  lcd.print(hasilPembacaan);
+
+}
+
+// Void Inisialisasi Setup
+void setupMq2(){
+  MQ2.setRegressionMethod(1); //_PPM =  a*ratio^b
+  MQ2.setA(36974); MQ2.setB(-3.109);
+  MQ2.init(); 
+  float calcR0 = 0;
+  for(int i = 1; i<=10; i ++)
+  {
+    MQ2.update(); // Update data, the arduino will read the voltage from the analog pin
+    calcR0 += MQ2.calibrate(RatioMQ2CleanAir);
+    Serial.print(".");
+  }
+  MQ2.setR0(calcR0/10);
+}
+
+
+// Void Inisialisasi WindSpeed
+void anemometer(){
+  unsigned long waktuSekarang = millis();
+  unsigned long waktuDelta = waktuSekarang - waktuMulai;
+  if (waktuDelta >= 10000) {
+    // Hitung kecepatan angin dalam satuan yang diinginkan (misalnya, meter per detik)
+    float kecepatanAngin = 2 * (float)jumlahPutaran * KONSTANTA / waktuDelta;
+    float windSpeed = 0.00;
+    windSpeed = kecepatanAngin;
+
+    lcd.setCursor(5, 1);
+    lcd.print(windSpeed);
+
+    Serial.print(kecepatanAngin);
+    Serial.println(" m/s");
+
+    // Reset jumlah putaran dan waktu
+    jumlahPutaran = 0;
+    waktuMulai = waktuSekarang;
+  }
+}
+
+// Fungsi untuk menghitung putaran
+void hitungPutaran() {
+  jumlahPutaran++;
+}
