@@ -1,0 +1,369 @@
+#include <LoRa.h>
+#include <DHT11.h>
+#include <MQUnifiedsensor.h>
+#include <LiquidCrystal_I2C.h> 
+
+byte HumidityIcon[] = {
+  0x04,
+  0x0E,
+  0x17,
+  0x1F,
+  0x1D,
+  0x0E,
+  0x00,
+  0x00
+};
+
+byte WindIcon[] = {
+  0x00,
+  0x13,
+  0x14,
+  0x0A,
+  0x05,
+  0x19,
+  0x00,
+  0x00
+};
+
+byte CoIcon[] = {
+  0x0E,
+  0x11,
+  0x11,
+  0x00,
+  0x0E,
+  0x11,
+  0x11,
+  0x0E
+};
+
+byte ThermorstatIcon[] = {
+  B00100,
+  B11010,
+  B01010,
+  B11010,
+  B01110,
+  B01110,
+  B11111,
+  B11111
+};
+
+byte TowerIcon[] = {
+  B10001,
+  B01010,
+  B10101,
+  B00100,
+  B01110,
+  B11111,
+  B11111,
+  B00000
+};
+
+byte RainIcon[] = {
+  B01110,
+  B11111,
+  B11111,
+  B10010,
+  B01001,
+  B10010,
+  B01001,
+  B10010
+};
+
+byte SoilIcon[] = {
+  B11111,
+  B11111,
+  B10101,
+  B10101,
+  B10101,
+  B10101,
+  B10101,
+  B01010
+};
+
+byte BattIcon[] = {
+  B00000,
+  B00000,
+  B01010,
+  B11111,
+  B10001,
+  B11111,
+  B00000,
+  B00000
+};
+
+// Inisialisasi Lora & AesLib
+#define SS_PIN 5
+#define RST_PIN 0
+#define DI0_PIN 2
+#define BAND 915E6
+unsigned long delayLora = 0;
+const long intLora = 3000;
+
+// Setup MQ-2 
+#define Board ("ESP-32")
+#define Pin (36)
+#define Type ("MQ-2")
+#define Voltage_Resolution (3.3)
+#define ADC_Bit_Resolution (12)
+#define RatioMQ2CleanAir (9.83)
+
+// Setup Battery Sensor
+const int ANALOG_IN_PIN = 33;
+const float Vmax = 12.0; 
+const float Vmin = 6.5;
+float adc_voltage = 0.0;
+float in_voltage = 0.0;
+float R1 = 30000.0;
+float R2 = 7500.0; 
+float ref_voltage = 5.0;
+int adc_value = 0;
+
+// Setup Soil Sensor 
+#define SoilPin 39
+
+// Setup Rain Sensor
+#define RainPin 34
+
+// inisialisasi DHT11
+DHT11 dht11(15);
+
+// inisialisasi LCD
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+unsigned long previousMillis = 0;
+const long interval = 3000;
+int currentLayer = 2;
+
+
+// inisialisasi MQ-2 Sensor
+MQUnifiedsensor MQ2(Board, Voltage_Resolution, ADC_Bit_Resolution, Pin, Type);
+
+// inisialisasi WindSpeed
+const int sensorPin = 26;
+volatile unsigned long jumlahPutaran = 0;
+unsigned long waktuMulai;
+const float KONSTANTA = 18.00; //Jumlah Rotor 18
+
+
+// Global String
+int humidity = 0;
+int temperature = 0;
+int batteryPercentage;
+float gasCo;
+float BattVolt;
+float windSpeed = 0.00;
+float rainDrop;
+float kelembabanTanah;
+
+void setup() {
+  Serial.begin(9600);
+  // LCD Setup
+  lcd.begin();
+  lcd.createChar(0, ThermorstatIcon);  
+  lcd.createChar(1, HumidityIcon);
+  lcd.createChar(2, WindIcon);
+  lcd.createChar(3, CoIcon);   
+  lcd.createChar(4, TowerIcon);  
+  lcd.createChar(5, RainIcon);
+  lcd.createChar(6, SoilIcon);
+  lcd.createChar(7, BattIcon);  
+  displayLayer1();
+  delay(interval);
+
+  // Mq2
+  setupMq2();
+  
+  // WindSpeed
+  attachInterrupt(digitalPinToInterrupt(sensorPin), hitungPutaran, RISING); 
+  waktuMulai = millis();
+
+  // Lora
+  LoRa.setPins(SS_PIN, RST_PIN, DI0_PIN);
+  if (!LoRa.begin(BAND)) {
+    Serial.println("Starting LoRa failed!");
+    while (1);
+  }
+  Serial.println("LoRa Initializing OK!");
+}
+
+void loop() {
+  // Battery Sensor
+  adc_value = analogRead(ANALOG_IN_PIN) / 6;
+  adc_voltage  = (adc_value * ref_voltage) / 1024.0; 
+  in_voltage = adc_voltage / (R2/(R1+R2));
+  batteryPercentage = map(in_voltage, Vmin, Vmax, 0, 100); 
+  BattVolt = in_voltage;
+
+  anemometer();
+  // dht11
+  int result = dht11.readTemperatureHumidity(temperature, humidity);
+  
+  // MQ2 
+  MQ2.update();
+  gasCo = MQ2.readSensor();
+
+  // Soil Mosture
+  int hasilPembacaanSoil = analogRead(SoilPin);
+  kelembabanTanah = map(hasilPembacaanSoil, 1600, 4095, 100, 0);
+
+  // RainDrop
+  int hasilPembacaanRain = analogRead(RainPin);
+  rainDrop = map(hasilPembacaanRain, 1300, 4095, 100, 0);
+
+
+  // Lcd
+  unsigned long currentMillis = millis();
+
+  // Cek apakah sudah waktunya untuk beralih ke layer berikutnya
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis;
+
+    // Toggle antara layer 1 dan 2
+    if (currentLayer == 1) {
+      displayLayer2();
+      currentLayer = 2;
+    } else {
+      displayLayer1();
+      currentLayer = 1;
+    }
+  }
+
+  LoraSender();
+
+  if (LoRa.parsePacket()) {
+      // Membaca pesan konfirmasi
+      String confirmationMessage = "";
+      while (LoRa.available()) {
+        confirmationMessage += (char)LoRa.read();
+      }
+      
+      // Cek apakah pesan konfirmasi sesuai
+      if (confirmationMessage == "LoraAzrnConfirmUwU") {
+        lcd.setCursor(15, 0);
+        lcd.write(4);
+      }
+    }
+
+
+}
+
+// Void Inisialisasi Setup
+void setupMq2(){
+  MQ2.setRegressionMethod(1); //_PPM =  a*ratio^b
+  MQ2.setA(36974); MQ2.setB(-3.109);
+  MQ2.init(); 
+  float calcR0 = 0;
+  for(int i = 1; i<=10; i ++)
+  {
+    MQ2.update(); // Update data, the arduino will read the voltage from the analog pin
+    calcR0 += MQ2.calibrate(RatioMQ2CleanAir);
+    Serial.print(".");
+  }
+  MQ2.setR0(calcR0/10);
+}
+
+
+// Void Inisialisasi WindSpeed
+void anemometer(){
+  unsigned long waktuSekarang = millis();
+  unsigned long waktuDelta = waktuSekarang - waktuMulai;
+  if (waktuDelta >= 10000) {
+    // Hitung kecepatan angin dalam satuan yang diinginkan (misalnya, meter per detik)
+    float kecepatanAngin = 2 * (float)jumlahPutaran * KONSTANTA / waktuDelta;
+    windSpeed = kecepatanAngin;
+
+    // Reset jumlah putaran dan waktu
+    jumlahPutaran = 0;
+    waktuMulai = waktuSekarang;
+  }
+}
+
+// Fungsi untuk menghitung putaran
+void hitungPutaran() {
+  jumlahPutaran++;
+}
+
+
+void displayLayer1() {
+  // Temp
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.write(0);
+  lcd.setCursor(1, 0);
+  lcd.print(temperature);
+
+  // Humd
+  lcd.setCursor(0, 1);
+  lcd.write(1);
+  lcd.setCursor(1, 1);
+  lcd.print(humidity);
+
+  // WindSpeed
+  lcd.setCursor(4, 1);
+  lcd.write(2);
+  lcd.setCursor(5, 1);
+  lcd.print(windSpeed);
+  lcd.setCursor(10, 1);
+  lcd.print("M/S");
+
+  // COSensor
+  lcd.setCursor(4, 0);
+  lcd.write(3);
+  lcd.setCursor(5, 0);
+  lcd.print(gasCo);
+  lcd.setCursor(10, 0);
+  lcd.print("PPM");
+}
+
+void displayLayer2() {
+  // Raindrop Sensor
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.write(5);
+  lcd.setCursor(1, 0);
+  lcd.print(rainDrop);
+  lcd.setCursor(6, 0);
+  lcd.print("%");
+
+  // Soil Mosture
+  lcd.setCursor(0, 1);
+  lcd.write(6);
+  lcd.setCursor(1, 1);
+  lcd.print(kelembabanTanah);
+  lcd.setCursor(6, 1);
+  lcd.print("%");
+
+  // Batt%
+  lcd.setCursor(8, 0);
+  lcd.write(7);
+  lcd.setCursor(9, 0);
+  lcd.print(batteryPercentage);
+  lcd.setCursor(12, 0);
+  lcd.print("%");
+  
+  // BattVolt
+  lcd.setCursor(8, 1);
+  lcd.write(7);
+  lcd.setCursor(9, 1);
+  lcd.print(BattVolt);
+  lcd.setCursor(14, 1);
+  lcd.print("V");
+}
+
+
+void LoraSender(){
+  unsigned long currentLoraDelay = millis();
+
+  if (currentLoraDelay - delayLora >= intLora){
+    String data = String(humidity) + "," + String(temperature) + "," + String(batteryPercentage) + "," +
+                  String(gasCo, 2) + "," + String(BattVolt, 2) + "," +
+                  String(windSpeed, 2) + "," + String(rainDrop, 2) + "," +
+                  String(kelembabanTanah, 2);
+    Serial.println(data);
+
+    LoRa.beginPacket();
+    LoRa.print(data);
+    LoRa.endPacket();
+
+    delayLora = currentLoraDelay; 
+  }
+}
